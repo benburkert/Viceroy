@@ -10,7 +10,11 @@ use hyper::Uri;
 /// header of the request.
 pub fn prepare_request(req: Request<hyper::Body>) -> Result<Request<Body>, DownstreamRequestError> {
     let (mut metadata, body) = req.into_parts();
-    let uri_parts = metadata.uri.into_parts();
+    let mut uri_parts = metadata.uri.into_parts();
+
+    // Hard code http/1.1 version & http scheme to prevent h2/tls to the backend
+    metadata.version = http::version::Version::HTTP_11;
+    uri_parts.scheme = Some(http::uri::Scheme::HTTP);
 
     // Prefer to find the host from the HOST header, rather than the URL.
     let http_host = if let Some(host_header) = metadata.headers.get(http::header::HOST) {

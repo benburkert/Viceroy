@@ -28,6 +28,7 @@ mod object_store;
 mod secret_store;
 mod service;
 mod streaming_body;
+mod tls;
 mod upstream;
 mod wiggle_abi;
 

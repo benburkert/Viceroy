@@ -6,6 +6,9 @@ use {crate::wiggle_abi::types::FastlyStatus, url::Url, wiggle::GuestError};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error(transparent)]
+    Acme2Error(#[from] acme2_eab::Error),
+
     /// Thrown by hostcalls when a buffer is larger than its `*_len` limit.
     #[error("Buffer length error: {buf} too long to fit in {len}")]
     BufferLengthError {
@@ -149,6 +152,7 @@ impl Error {
     /// [status]: fastly_shared/struct.FastlyStatus.html
     pub fn to_fastly_status(&self) -> FastlyStatus {
         match self {
+            Error::Acme2Error(_) => FastlyStatus::Error,
             Error::BufferLengthError { .. } => FastlyStatus::Buflen,
             Error::InvalidArgument => FastlyStatus::Inval,
             Error::ValueAbsent => FastlyStatus::None,

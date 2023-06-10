@@ -1,19 +1,25 @@
 //! Service types.
 
 use {
-    crate::{body::Body, execute::ExecuteCtx, Error},
+    crate::{body::Body, execute::ExecuteCtx, tls::TlsAcceptor, tls::TlsStream, Error},
+    acme2_eab::{gen_ec_p256_private_key, AccountBuilder, Csr, DirectoryBuilder, OrderBuilder},
     futures::future::{self, Ready},
     hyper::{
         http::{Request, Response},
-        server::conn::AddrStream,
+        server::conn::{AddrIncoming, AddrStream},
         service::Service,
     },
+    openssl::pkey::PKey,
+    rustls::{Certificate, PrivateKey, ServerConfig},
     std::{
         convert::Infallible,
+        env,
         future::Future,
         net::{IpAddr, SocketAddr},
         pin::Pin,
+        sync,
         task::{self, Poll},
+        time::Duration,
     },
     tracing::{event, Level},
 };
@@ -62,9 +68,81 @@ impl ViceroyService {
     /// This will consume the service, using it to start a server that will execute the given module
     /// each time a new request is sent. This function will only return if an error occurs.
     // FIXME KTM 2020-06-22: Once `!` is stabilized, this should be `Result<!, hyper::Error>`.
-    pub async fn serve(self, addr: SocketAddr) -> Result<(), hyper::Error> {
-        let server = hyper::Server::bind(&addr).serve(self);
-        event!(Level::INFO, "Listening on http://{}", server.local_addr());
+    pub async fn serve(self, addr: SocketAddr) -> Result<(), Error> {
+        // load ACME env vars
+        let contact = env::var("ACME_CONTACT").unwrap_or("".to_string());
+        let dir_url = env::var("ACME_DIRECTORY_URL").unwrap();
+        let domain = env::var("DOMAIN").unwrap();
+        let eab_kid = env::var("ACME_KID").unwrap();
+        let key_str = env::var("ACME_HMAC_KEY").unwrap().to_string();
+
+        // load EAB HMAC key
+        let key_bytes = base64_url::decode(&key_str).unwrap();
+        let eab_key = PKey::hmac(&key_bytes).unwrap();
+
+        // Create a new ACMEv2 directory.
+        let dir = DirectoryBuilder::new(dir_url).build().await?;
+
+        // Create an ACME account to use for the certificate order.
+        let account = AccountBuilder::new(dir.clone())
+            .contact(vec![contact])
+            .terms_of_service_agreed(true)
+            .external_account_binding(eab_kid, eab_key)
+            .build()
+            .await?;
+
+        // Create a new order for a specific domain name.
+        let order = OrderBuilder::new(account)
+            .add_dns_identifier(domain.to_string())
+            .build()
+            .await?;
+
+        // Poll the order every 1 second until it is ready, up to 30 seconds.
+        let order = order.wait_ready(Duration::from_secs(1), 30).await?;
+
+        // Generate an ECDSA private key for the certificate.
+        let key = gen_ec_p256_private_key()?;
+
+        // Create a CSR for the order, and request the certificate.
+        let order = order.finalize(Csr::Automatic(key.clone())).await?;
+
+        // Poll the order every 1 second until it's valid, up to 30 seconds.
+        let order = order.wait_done(Duration::from_secs(1), 30).await?;
+
+        // Download the certificate.
+        let x509 = order.certificate().await?.unwrap();
+
+        // Build rustls certificates.
+        let certs = x509
+            .iter()
+            .map(|x| Certificate(x.to_der().unwrap()))
+            .collect::<Vec<_>>();
+
+        // Convert openssl key to rustls key.
+        let priv_key = PrivateKey(key.private_key_to_pkcs8().unwrap());
+
+        // Create a TCP listener via tokio.
+        let incoming = AddrIncoming::bind(&addr)?;
+
+        // Build TLS configuration.
+        let mut tls_cfg = ServerConfig::builder()
+            .with_safe_defaults()
+            .with_no_client_auth()
+            .with_single_cert(certs, priv_key)
+            .unwrap();
+        tls_cfg.alpn_protocols = vec!["h2".into(), "http/1.1".into()];
+
+        // Build TLS acceptor from vendored hyper-rustls example.
+        let tls_acceptor = TlsAcceptor::new(sync::Arc::new(tls_cfg), incoming);
+
+        // Create Hyper server.
+        let server = hyper::Server::builder(tls_acceptor).serve(self);
+        event!(
+            Level::INFO,
+            "Listening on https://{}:{}",
+            domain,
+            addr.port()
+        );
         server.await?;
         Ok(())
     }
@@ -81,6 +159,21 @@ impl<'addr> Service<&'addr AddrStream> for ViceroyService {
 
     fn call(&mut self, addr: &'addr AddrStream) -> Self::Future {
         future::ok(self.make_service(addr.remote_addr().ip()))
+    }
+}
+
+impl<'tls> Service<&'tls TlsStream> for ViceroyService {
+    type Response = RequestService;
+    type Error = Infallible;
+    type Future = Ready<Result<Self::Response, Self::Error>>;
+
+    fn poll_ready(&mut self, _cx: &mut task::Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, _tls: &'tls TlsStream) -> Self::Future {
+        let addr = std::net::Ipv4Addr::new(127, 0, 0, 1);
+        future::ok(self.make_service(addr.into()))
     }
 }
 
