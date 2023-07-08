@@ -128,6 +128,7 @@ impl hyper::service::Service<Uri> for BackendConnector {
                     config.partial_config.with_no_client_auth()
                 };
                 config.enable_sni = backend.use_sni;
+                config.alpn_protocols = vec!["h2".into(), "http/1.1".into()];
                 let connector = TlsConnector::from(Arc::new(config));
 
                 let cert_host = backend
