@@ -171,9 +171,11 @@ impl<'tls> Service<&'tls TlsStream> for ViceroyService {
         Poll::Ready(Ok(()))
     }
 
-    fn call(&mut self, _tls: &'tls TlsStream) -> Self::Future {
-        let addr = std::net::Ipv4Addr::new(127, 0, 0, 1);
-        future::ok(self.make_service(addr.into()))
+    fn call(&mut self, tls: &'tls TlsStream) -> Self::Future {
+        match tls.get_ref() {
+            Some(addr) => future::ok(self.make_service(addr.remote_addr().ip())),
+            None => unreachable!(),
+        }
     }
 }
 

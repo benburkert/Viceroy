@@ -27,6 +27,16 @@ impl TlsStream {
             state: State::Handshaking(accept),
         }
     }
+
+    pub fn get_ref(&self) -> Option<&AddrStream> {
+        match self.state {
+            State::Handshaking(ref accept) => accept.get_ref(),
+            State::Streaming(ref stream) => {
+                let (addr, _) = stream.get_ref();
+                Some(addr)
+            }
+        }
+    }
 }
 
 impl AsyncRead for TlsStream {
